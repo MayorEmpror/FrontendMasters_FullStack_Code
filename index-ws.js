@@ -1,51 +1,89 @@
-const express = require('express');
-const server = require('http').createServer();
+import { Database } from "bun:sqlite";
+import express from "express";
+import http from "http";
+import { WebSocketServer } from "ws";
+
 const app = express();
+const server = http.createServer(app);
 const PORT = 3000;
 
-app.get('/', function(req, res) {
-  res.sendFile('index.html', {root: __dirname});
+/** ---------------- SQLITE (Bun SQLite) ---------------- **/
+const db = new Database("memory.db");
+
+// table
+db.run(`
+  CREATE TABLE IF NOT EXISTS visitors (
+    count INTEGER,
+    time TEXT
+  );
+`);
+
+/** ---------------- EXPRESS ---------------- **/
+app.get("/", (req, res) => {
+  res.sendFile("index.html", { root: import.meta.dir });
 });
 
-server.on('request', app);
+/** ---------------- WEBSOCKET ---------------- **/
+const wss = new WebSocketServer({ server });
 
-server.listen(PORT, function () { console.log('Listening on ' + PORT); });
-
-/** Websocket **/
-const WebSocketServer = require('ws').Server;
-
-const wss = new WebSocketServer({ server: server });
-
-wss.on('connection', function connection(ws) {
+wss.on("connection", (ws) => {
   const numClients = wss.clients.size;
 
-  console.log('clients connected: ', numClients);
-
+  console.log("clients connected:", numClients);
   wss.broadcast(`Current visitors: ${numClients}`);
 
-  if (ws.readyState === ws.OPEN) {
-    ws.send('welcome!');
-  }
+  ws.send("welcome!");
 
-  ws.on('close', function close() {
+  // INSERT (Bun style)
+  const stmt = db.prepare(
+    "INSERT INTO visitors (count, time) VALUES (?, datetime('now'))"
+  );
+  stmt.run(numClients);
+
+  ws.on("close", () => {
     wss.broadcast(`Current visitors: ${wss.clients.size}`);
-    console.log('A client has disconnected');
+    console.log("A client has disconnected");
   });
 
-  ws.on('error', function error() {
-    //
+  ws.on("error", () => {});
+});
+
+/** ---------------- BROADCAST ---------------- **/
+wss.broadcast = (data) => {
+  console.log("Broadcasting:", data);
+
+  for (const client of wss.clients) {
+    if (client.readyState === 1) {
+      client.send(data);
+    }
+  }
+};
+
+/** ---------------- SHUTDOWN ---------------- **/
+function getCount() {
+  const rows = db.query("SELECT * FROM visitors").all();
+
+  rows.forEach((row) => {
+    console.log(row);
+  });
+}
+
+function shutDownDB() {
+  getCount();
+  console.log("shutting down");
+  db.close();
+}
+
+process.on("SIGINT", () => {
+  wss.clients.forEach(function each(client){
+      client.close();
+  })
+  server.close(()=> {
+    shutDownDB();
   });
 });
 
-/**
- * Broadcast data to all connected clients
- * @param  {Object} data
- * @void
- */
-wss.broadcast = function broadcast(data) {
-  console.log('Broadcasting: ', data);
-  wss.clients.forEach(function each(client) {
-    client.send(data);
-  });
-};
-/** End Websocket **/
+/** ---------------- START ---------------- **/
+server.listen(PORT, () => {
+  console.log("Listening on " + PORT);
+});
